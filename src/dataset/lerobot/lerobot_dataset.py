@@ -263,6 +263,65 @@ class LeRobotEpisodeReader:
             raise ValueError("reader cache sizes must be positive")
         self.info = json.loads((self.root / "meta/info.json").read_text(encoding="utf-8"))
         self._validate_features()
+
+        # Derive active camera/video metadata from info.json instead of
+        # requiring the full head+chest+depth superset.
+        features = self.info.get("features", {})
+
+        self.video_keys = tuple(
+            key
+            for key in VIDEO_KEYS
+            if key in features
+        )
+
+        active_cameras = tuple(
+            camera
+            for camera in ("head", "chest")
+            if (
+                f"observation.images.{camera}" in features
+                or f"observation.images.{camera}_depth" in features
+            )
+        )
+
+        if "head" not in active_cameras:
+            raise ValueError(
+                "EgoSteer LeRobot dataset must provide a head camera"
+            )
+
+        self.calibration_shapes = {
+            **{
+                f"calibration/{cam}_intrinsics": (3, 3)
+                for cam in active_cameras
+            },
+            **{
+                f"calibration/{cam}_cam_to_{side}_base": (4, 4)
+                for cam in active_cameras
+                for side in ("left", "right")
+            },
+        }
+
+        self.episode_columns = {
+            "episode_index",
+            "length",
+            "tasks",
+            "instructions",
+            "dataset_from_index",
+            "dataset_to_index",
+            "data/chunk_index",
+            "data/file_index",
+            *self.calibration_shapes,
+            *(
+                f"videos/{key}/{field}"
+                for key in self.video_keys
+                for field in (
+                    "chunk_index",
+                    "file_index",
+                    "from_timestamp",
+                    "to_timestamp",
+                )
+            ),
+        }
+
         self.depth_params = {
             key: depth_parameters(self.info["features"][key])
             for key in self.video_keys
@@ -330,7 +389,7 @@ class LeRobotEpisodeReader:
                     or row["dataset_to_index"] - row["dataset_from_index"] != row["length"]
                 ):
                     raise ValueError(f"episode {eid}: invalid length/global index interval")
-                for field, shape in CALIBRATION_SHAPES.items():
+                for field, shape in self.calibration_shapes.items():
                     row[field] = np.asarray(row[field], dtype=np.float64).reshape(shape)
                 for key in self.video_keys:
                     prefix = f"videos/{key}"
